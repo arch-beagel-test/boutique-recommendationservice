@@ -25,6 +25,7 @@ from concurrent import futures
 
 from google.auth.exceptions import DefaultCredentialsError
 import grpc
+import redis
 
 import demo_pb2
 import demo_pb2_grpc
@@ -72,7 +73,9 @@ class RecommendationService(demo_pb2_grpc.RecommendationServiceServicer):
         # fetch list of products from product catalog stub
         cat_response = product_catalog_stub.ListProducts(demo_pb2.Empty())
         product_ids = [x.id for x in cat_response.products]
-        filtered_products = list(set(product_ids)-set(request.product_ids))
+        # cart is a redis hash per user ID: field = product ID (cartservice's layout)
+        cart_ids = set(cart_db.hkeys(request.user_id)) if cart_db and request.user_id else set()
+        filtered_products = list(set(product_ids)-set(request.product_ids)-cart_ids)
         num_products = len(filtered_products)
         num_return = min(max_responses, num_products)
         # sample list of indicies to return
@@ -134,6 +137,13 @@ if __name__ == "__main__":
     logger.info("product catalog address: " + catalog_addr)
     channel = grpc.insecure_channel(catalog_addr)
     product_catalog_stub = demo_pb2_grpc.ProductCatalogServiceStub(channel)
+
+    # redis-cart, read directly (issue #2); unset REDIS_ADDR disables cart filtering
+    redis_addr = os.environ.get('REDIS_ADDR', '')
+    cart_db = None
+    if redis_addr:
+        host, _, redis_port = redis_addr.partition(':')
+        cart_db = redis.Redis(host=host, port=int(redis_port or 6379), decode_responses=True)
 
     # create gRPC server
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
