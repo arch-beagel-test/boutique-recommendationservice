@@ -72,7 +72,16 @@ class RecommendationService(demo_pb2_grpc.RecommendationServiceServicer):
         # fetch list of products from product catalog stub
         cat_response = product_catalog_stub.ListProducts(demo_pb2.Empty())
         product_ids = [x.id for x in cat_response.products]
-        filtered_products = list(set(product_ids)-set(request.product_ids))
+        # cross/0009: the cart is read through cartservice's GetCart, never redis-cart directly
+        in_cart = set()
+        if cart_stub is not None and request.user_id:
+            try:
+                cart = cart_stub.GetCart(demo_pb2.GetCartRequest(user_id=request.user_id))
+                in_cart = {i.product_id for i in cart.items}
+            except grpc.RpcError as e:
+                # shortcut: fail open (recommend anyway) if cartservice is down, tighten if the owner wants strict
+                logger.warning("GetCart failed, not filtering by cart: {}".format(e.code()))
+        filtered_products = list(set(product_ids)-set(request.product_ids)-in_cart)
         num_products = len(filtered_products)
         num_return = min(max_responses, num_products)
         # sample list of indicies to return
@@ -134,6 +143,10 @@ if __name__ == "__main__":
     logger.info("product catalog address: " + catalog_addr)
     channel = grpc.insecure_channel(catalog_addr)
     product_catalog_stub = demo_pb2_grpc.ProductCatalogServiceStub(channel)
+
+    # optional: without CART_SERVICE_ADDR the cart is not used to filter
+    cart_addr = os.environ.get('CART_SERVICE_ADDR', '')
+    cart_stub = demo_pb2_grpc.CartServiceStub(grpc.insecure_channel(cart_addr)) if cart_addr else None
 
     # create gRPC server
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
